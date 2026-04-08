@@ -3,9 +3,9 @@ import { initializeApp } from 'firebase/app';
 import { getAuth, signInAnonymously, onAuthStateChanged } from 'firebase/auth';
 import { getFirestore, collection, addDoc, updateDoc, deleteDoc, doc, onSnapshot, setDoc } from 'firebase/firestore';
 import { getStorage, ref, uploadBytes, getDownloadURL } from 'firebase/storage';
-import { Home, ListOrdered, PieChart, Plus, X, ChevronLeft, CheckCircle2, RefreshCw, Trash2, Edit3, Settings, Lock, Store, UploadCloud, Receipt, Image as ImageIcon, Eraser, LogOut } from 'lucide-react';
+import { Home, ListOrdered, Plus, X, ChevronLeft, CheckCircle2, RefreshCw, Trash2, Edit3, Settings, Lock, Store, UploadCloud, Receipt, Image as ImageIcon, Eraser, LogOut, Truck } from 'lucide-react';
 
-// --- 1. FIREBASE INITIALIZATION (Standard Project Setup) ---
+// --- 1. FIREBASE INITIALIZATION ---
 const firebaseConfig = {
   apiKey: "AIzaSyAZyh-2I-_86i8JAh-BAfy__skTXTAZOeA",
   authDomain: "inventory-new-featherrise.firebaseapp.com",
@@ -26,7 +26,7 @@ const GOOGLE_SHEET_WEBHOOK_URL = "https://script.google.com/macros/s/AKfycbykYe5
 
 const scrollbarClass = "[&::-webkit-scrollbar]:w-1.5 [&::-webkit-scrollbar-track]:bg-transparent [&::-webkit-scrollbar-thumb]:bg-gray-300 [&::-webkit-scrollbar-thumb]:rounded-full hover:[&::-webkit-scrollbar-thumb]:bg-gray-400";
 
-// Default settings if none exist in DB
+// Default settings
 const DEFAULT_SETTINGS = {
   announcement: "สั่งจองล่วงหน้า 1-2 วันเพื่อความรวดเร็ว",
   promptpayId: "", 
@@ -35,13 +35,17 @@ const DEFAULT_SETTINGS = {
     { id: '2', name: 'ปีกไก่', price: 20 },
     { id: '3', name: 'หมูทอด', price: 30 }
   ],
+  deliveryOptions: [
+    { id: 'dl1', name: 'มารับเองที่ร้าน', price: 0 },
+    { id: 'dl2', name: 'จัดส่งรอบมอฯ', price: 20 }
+  ],
   pickupDates: [
     { id: 'd1', date: new Date().toISOString().split('T')[0], label: 'รอบปกติ', isOpen: true }
   ]
 };
 
 // ==========================================
-// 2. iOS Animated Modal Component (จากระบบบัญชี)
+// 2. iOS Animated Modal Component
 // ==========================================
 const AnimatedModal = ({ isOpen, onClose, children, maxWidth = "max-w-sm", originClass = "origin-center", bgClass = "bg-white", pClass="p-6" }) => {
   const [render, setRender] = useState(isOpen);
@@ -103,8 +107,13 @@ export default function App() {
   const [slipFile, setSlipFile] = useState(null);
   const [slipPreview, setSlipPreview] = useState('');
 
-  // Form State
-  const initialForm = { name: '', phone: '', pickupDate: '', items: [{ menu: '', qty: '' }], deposit: '', note: '', status: 'pending', slipUrl: '', totalPrice: 0 };
+  // Form State (Added delivery)
+  const initialForm = { 
+    name: '', phone: '', pickupDate: '', 
+    items: [{ menu: '', qty: '' }], 
+    delivery: { name: '', price: 0 }, 
+    deposit: '', note: '', status: 'pending', slipUrl: '', totalPrice: 0 
+  };
   const [formData, setFormData] = useState(initialForm);
 
   // --- FIREBASE AUTH & DATA FETCHING ---
@@ -127,7 +136,9 @@ export default function App() {
     const settingsRef = doc(db, 'preorder_settings', 'main_config');
     const unsubSettings = onSnapshot(settingsRef, (snapshot) => {
       if (snapshot.exists()) {
-        setSettings(snapshot.data());
+        const data = snapshot.data();
+        // Merge missing default keys just in case
+        setSettings({ ...DEFAULT_SETTINGS, ...data });
       } else {
         setDoc(settingsRef, DEFAULT_SETTINGS);
         setSettings(DEFAULT_SETTINGS);
@@ -167,31 +178,36 @@ export default function App() {
 
   const unpaidOrders = useMemo(() => orders.filter(o => o.status === 'pending' && (!o.deposit || parseFloat(o.deposit) === 0) && !o.slipUrl), [orders]);
 
-  const menuSummary = useMemo(() => {
-    const map = {};
-    orders.filter(o => o.status !== 'cancel').forEach(o => {
-      (o.items || []).forEach(item => {
-        if (item.menu && item.qty) {
-          map[item.menu] = (map[item.menu] || 0) + parseInt(item.qty || 0);
-        }
-      });
-    });
-    return Object.entries(map).sort((a, b) => b[1] - a[1]);
-  }, [orders]);
-
   const totalDeposit = useMemo(() => {
     return orders.filter(o => o.status !== 'cancel').reduce((sum, o) => sum + parseFloat(o.deposit || 0), 0);
   }, [orders]);
 
+  // คำนวณจำนวนชิ้นไก่รวมทั้งหมด (เฉพาะออเดอร์ที่ไม่ได้ยกเลิก)
+  const totalChickenPieces = useMemo(() => {
+    return orders.filter(o => o.status !== 'cancel').reduce((sum, o) => {
+      return sum + (o.items || []).reduce((itemSum, item) => itemSum + (parseInt(item.qty) || 0), 0);
+    }, 0);
+  }, [orders]);
+
+  // Calculate Total Price dynamically (Menu + Delivery)
   const calculatedTotal = useMemo(() => {
     if (!settings?.menus) return 0;
-    return formData.items.reduce((sum, item) => {
+    const menuTotal = formData.items.reduce((sum, item) => {
       const menuObj = settings.menus.find(m => m.name === item.menu);
       const price = menuObj ? Number(menuObj.price) : 0;
       const qty = Number(item.qty) || 0;
       return sum + (price * qty);
     }, 0);
-  }, [formData.items, settings?.menus]);
+    
+    const deliveryFee = Number(formData.delivery?.price) || 0;
+    
+    return menuTotal + deliveryFee;
+  }, [formData.items, formData.delivery, settings?.menus]);
+
+  // Check if slip is mandatory
+  const isSlipRequired = useMemo(() => {
+    return calculatedTotal > 0 && settings?.promptpayId && !slipFile && role === 'guest';
+  }, [calculatedTotal, settings?.promptpayId, slipFile, role]);
 
   // --- ACTIONS ---
   const handlePinInput = (val) => {
@@ -231,7 +247,8 @@ export default function App() {
   };
 
   const handleSaveOrder = async () => {
-    if (!formData.name.trim()) return alert('กรุณากรอกชื่อลูกค้า');
+    if (!formData.name.trim()) return alert('กรุณากรอกชื่อ-นามสกุลลูกค้า');
+    if (!formData.phone.trim()) return alert('กรุณากรอกเบอร์โทรศัพท์ติดต่อ');
     if (role === 'admin' && !formData.pickupDate) return alert('กรุณาเลือกวันรับของ');
     
     let finalPickupDate = formData.pickupDate;
@@ -240,8 +257,16 @@ export default function App() {
       if (activeDates.length > 0) finalPickupDate = activeDates[0].date;
     }
 
+    // ตรวจสอบว่ากรอกเมนูและจำนวนครบทุกบรรทัดหรือไม่
+    const hasInvalidItems = formData.items.some(i => !i.menu || !i.qty || Number(i.qty) <= 0);
+    if (hasInvalidItems || formData.items.length === 0) return alert('กรุณาเลือกเมนูและระบุจำนวนให้ครบถ้วนทุกรายการ');
+
+    // ตรวจสอบว่าเลือกการจัดส่งหรือยัง (สำหรับลูกค้า)
+    if (role === 'guest' && !formData.delivery?.name) return alert('กรุณาเลือกวิธีการจัดส่ง / รับของ');
+
+    if (isSlipRequired) return alert('กรุณาแนบสลิปการโอนเงินก่อนยืนยันออเดอร์');
+
     const validItems = formData.items.filter(i => i.menu && i.qty);
-    if (validItems.length === 0) return alert('กรุณาเลือกเมนูอย่างน้อย 1 รายการ');
 
     setIsSubmitting(true);
     let finalSlipUrl = formData.slipUrl;
@@ -319,6 +344,21 @@ export default function App() {
   const handleSyncToSheets = async () => {
     setSyncing(true);
     try {
+      // จัดรูปแบบข้อมูลใหม่ทั้งหมด เพื่อส่งไปเขียนลง Google Sheets ครบทุกคอลัมน์
+      const formattedOrders = orders.map(o => ({
+        id: o.id,
+        timestamp: new Date(o.createdAt).toLocaleString('th-TH'),
+        date: o.pickupDate || '-',
+        customerName: o.name,
+        phone: o.phone || '-',
+        items: o.items.map(i => `${i.menu} x${i.qty}`).join(', '),
+        delivery: o.delivery?.name || '-',
+        totalPrice: o.totalPrice || 0,
+        deposit: o.deposit || 0,
+        status: o.status,
+        note: o.note || '-'
+      }));
+
       await fetch(GOOGLE_SHEET_WEBHOOK_URL, {
         method: 'POST',
         mode: 'no-cors',
@@ -326,8 +366,7 @@ export default function App() {
         body: JSON.stringify({
           action: 'sync_preorders',
           targetSheet: 'PreOrders',
-          totalOrders: orders.length,
-          totalDeposit: totalDeposit,
+          ordersData: formattedOrders,
           timestamp: new Date().toISOString()
         })
       });
@@ -341,7 +380,11 @@ export default function App() {
   const openModal = (order = null) => {
     if (order) {
       setEditId(order.id);
-      setFormData({ ...order, items: order.items?.length ? order.items : [{ menu: '', qty: '' }] });
+      setFormData({ 
+        ...order, 
+        items: order.items?.length ? order.items : [{ menu: '', qty: '' }],
+        delivery: order.delivery || { name: '', price: 0 }
+      });
       setSlipPreview(order.slipUrl || '');
     } else {
       setEditId(null);
@@ -404,11 +447,11 @@ export default function App() {
             <div className="space-y-4">
               <div className="relative">
                   <span className="absolute -top-2.5 left-3 bg-white px-1 text-[10px] font-semibold text-gray-500 z-10">ชื่อ-นามสกุล *</span>
-                  <input type="text" className="w-full p-3 h-[52px] border border-gray-300 rounded-xl outline-none focus:ring-2 focus:ring-orange-500 text-sm transition-all" value={formData.name} onChange={e => setFormData({ ...formData, name: e.target.value })} />
+                  <input type="text" className="w-full p-3 h-[52px] border border-gray-300 rounded-xl outline-none focus:ring-2 focus:ring-orange-500 text-sm transition-all bg-white text-gray-900" value={formData.name} onChange={e => setFormData({ ...formData, name: e.target.value })} />
               </div>
               <div className="relative">
                   <span className="absolute -top-2.5 left-3 bg-white px-1 text-[10px] font-semibold text-gray-500 z-10">เบอร์โทรศัพท์ติดต่อ *</span>
-                  <input type="tel" className="w-full p-3 h-[52px] border border-gray-300 rounded-xl outline-none focus:ring-2 focus:ring-orange-500 text-sm transition-all" value={formData.phone} onChange={e => setFormData({ ...formData, phone: e.target.value })} />
+                  <input type="tel" className="w-full p-3 h-[52px] border border-gray-300 rounded-xl outline-none focus:ring-2 focus:ring-orange-500 text-sm transition-all bg-white text-gray-900" value={formData.phone} onChange={e => setFormData({ ...formData, phone: e.target.value })} />
               </div>
             </div>
           </div>
@@ -445,7 +488,6 @@ export default function App() {
                  <span className="w-1.5 h-4 bg-orange-500 rounded-full"></span> รายการอาหาร
               </h3>
               <div className="flex gap-2">
-                 {/* ปุ่มล้างข้อมูล */}
                  {formData.items.length > 0 && formData.items[0].menu !== '' && (
                     <button onClick={() => setFormData({ ...formData, items: [{ menu: '', qty: '' }] })} className="text-[11px] font-bold text-red-500 bg-red-50 hover:bg-red-100 px-2.5 py-1.5 rounded-lg transition-colors flex items-center gap-1 active:scale-95">
                       <Eraser size={12}/> ล้าง
@@ -461,7 +503,7 @@ export default function App() {
               {formData.items.map((item, i) => (
                 <div key={i} className="flex gap-2">
                   <div className="flex-1 relative">
-                    <select className="w-full bg-white h-[52px] border border-gray-300 rounded-xl px-3 text-sm outline-none appearance-none font-medium text-gray-700 transition-all focus:ring-2 focus:ring-orange-500" value={item.menu} onChange={e => {
+                    <select className="w-full bg-white h-[52px] border border-gray-300 rounded-xl px-3 text-sm outline-none appearance-none font-medium text-gray-900 transition-all focus:ring-2 focus:ring-orange-500" value={item.menu} onChange={e => {
                       const newItems = [...formData.items]; newItems[i].menu = e.target.value; setFormData({ ...formData, items: newItems });
                     }}>
                       <option value="" disabled>เลือกเมนู...</option>
@@ -472,7 +514,7 @@ export default function App() {
                     <div className="absolute right-4 top-1/2 -translate-y-1/2 pointer-events-none text-gray-400 text-xs">▼</div>
                   </div>
                   
-                  <input type="number" min="1" className="w-20 bg-white h-[52px] border border-gray-300 rounded-xl px-2 text-center text-sm outline-none font-bold text-gray-700 placeholder:font-normal focus:ring-2 focus:ring-orange-500 transition-all" placeholder="จำนวน" value={item.qty} onChange={e => {
+                  <input type="number" min="1" className="w-20 bg-white h-[52px] border border-gray-300 rounded-xl px-2 text-center text-sm outline-none font-bold text-gray-900 placeholder:font-normal focus:ring-2 focus:ring-orange-500 transition-all" placeholder="จำนวน" value={item.qty} onChange={e => {
                     const newItems = [...formData.items]; newItems[i].qty = e.target.value; setFormData({ ...formData, items: newItems });
                   }} />
                   
@@ -484,10 +526,43 @@ export default function App() {
                 </div>
               ))}
               
+              {/* Delivery Selection */}
+              <div className="pt-4 border-t border-gray-100 mt-4">
+                 <h3 className="text-xs font-bold text-gray-800 flex items-center gap-1.5 mb-3">
+                   <Truck size={14} className="text-orange-500"/> การจัดส่ง / รับของ
+                 </h3>
+                 <div className="relative">
+                    <select className="w-full bg-white h-[52px] border border-gray-300 rounded-xl px-3 text-sm outline-none appearance-none font-medium text-gray-900 transition-all focus:ring-2 focus:ring-orange-500" 
+                      value={formData.delivery?.name || ''} 
+                      onChange={e => {
+                        const selectedOption = settings?.deliveryOptions?.find(opt => opt.name === e.target.value);
+                        setFormData({ 
+                          ...formData, 
+                          delivery: { name: selectedOption?.name || '', price: Number(selectedOption?.price || 0) } 
+                        });
+                      }}
+                    >
+                      <option value="" disabled>เลือกวิธีการรับสินค้า...</option>
+                      {settings?.deliveryOptions?.map(opt => (
+                        <option key={opt.id} value={opt.name}>{opt.name} {opt.price > 0 ? `(+฿${opt.price})` : '(ฟรี)'}</option>
+                      ))}
+                    </select>
+                    <div className="absolute right-4 top-1/2 -translate-y-1/2 pointer-events-none text-gray-400 text-xs">▼</div>
+                 </div>
+              </div>
+
               {calculatedTotal > 0 && (
-                <div className="flex justify-between items-center px-4 py-3.5 bg-orange-50 rounded-xl mt-4 border border-orange-100">
-                  <span className="text-sm font-bold text-orange-800">ยอดชำระทั้งหมด:</span>
-                  <span className="text-xl font-bold text-orange-600">฿{calculatedTotal.toLocaleString()}</span>
+                <div className="px-4 py-3.5 bg-orange-50 rounded-xl border border-orange-100 space-y-1.5">
+                  {formData.delivery?.name && (
+                    <div className="flex justify-between items-center text-xs text-orange-700">
+                      <span>ค่าจัดส่ง ({formData.delivery.name})</span>
+                      <span className="font-bold">฿{formData.delivery.price}</span>
+                    </div>
+                  )}
+                  <div className="flex justify-between items-center pt-1.5 border-t border-orange-200/50">
+                    <span className="text-sm font-bold text-orange-900">ยอดชำระทั้งหมด:</span>
+                    <span className="text-xl font-bold text-orange-600">฿{calculatedTotal.toLocaleString()}</span>
+                  </div>
                 </div>
               )}
             </div>
@@ -510,7 +585,7 @@ export default function App() {
                   
                   {!slipPreview ? (
                     <button onClick={() => fileInputRef.current.click()} className="w-full flex items-center justify-center gap-2 py-3.5 bg-white text-orange-600 rounded-xl text-sm font-bold active:scale-[0.98] border border-orange-200 hover:bg-orange-50 transition-all shadow-sm">
-                      <UploadCloud size={18} /> แนบสลิปโอนเงิน (ไม่เกิน 5MB)
+                      <UploadCloud size={18} /> แนบสลิปโอนเงิน (บังคับ)
                     </button>
                   ) : (
                     <div className="relative inline-block w-full">
@@ -531,13 +606,24 @@ export default function App() {
           <div className="bg-white p-5 rounded-2xl shadow-sm border border-gray-200">
             <div className="relative">
                 <span className="absolute -top-2.5 left-3 bg-white px-1 text-[10px] font-semibold text-gray-500 z-10">หมายเหตุ / ความต้องการพิเศษ</span>
-                <textarea className="w-full p-4 border border-gray-300 rounded-xl outline-none focus:ring-2 focus:ring-orange-500 text-sm transition-all min-h-[80px] resize-none" placeholder="ระบุเพิ่มเติม..." value={formData.note} onChange={e => setFormData({ ...formData, note: e.target.value })} />
+                <textarea className="w-full p-4 border border-gray-300 rounded-xl outline-none focus:ring-2 focus:ring-orange-500 text-sm transition-all min-h-[80px] resize-none bg-white text-gray-900" placeholder="ระบุเพิ่มเติม..." value={formData.note} onChange={e => setFormData({ ...formData, note: e.target.value })} />
             </div>
           </div>
 
           <div className="pt-2 pb-8">
-            <button onClick={handleSaveOrder} disabled={activeDates.length === 0 || isSubmitting} className="w-full bg-orange-600 hover:bg-orange-700 text-white py-4 rounded-2xl font-bold text-base shadow-md active:scale-[0.98] transition-all disabled:opacity-50 disabled:active:scale-100 flex items-center justify-center gap-2">
-              {isSubmitting ? <span className="animate-pulse flex items-center gap-2"><RefreshCw size={18} className="animate-spin" /> กำลังส่งข้อมูล...</span> : <>ยืนยันส่งคำสั่งจอง <ChevronLeft size={18} className="rotate-180" /></>}
+            <button 
+              onClick={handleSaveOrder} 
+              disabled={activeDates.length === 0 || isSubmitting || isSlipRequired} 
+              className={`w-full py-4 rounded-2xl font-bold text-base shadow-md active:scale-[0.98] transition-all flex items-center justify-center gap-2 
+                ${isSlipRequired ? 'bg-gray-200 text-gray-500 cursor-not-allowed' : 'bg-orange-600 hover:bg-orange-700 text-white disabled:opacity-50'}`}
+            >
+              {isSubmitting ? (
+                <span className="animate-pulse flex items-center gap-2"><RefreshCw size={18} className="animate-spin" /> กำลังส่งข้อมูล...</span>
+              ) : isSlipRequired ? (
+                'กรุณาแนบสลิปก่อนยืนยันออเดอร์'
+              ) : (
+                <>ยืนยันส่งคำสั่งจอง <ChevronLeft size={18} className="rotate-180" /></>
+              )}
             </button>
           </div>
         </div>
@@ -549,7 +635,6 @@ export default function App() {
           </button>
         </div>
 
-        {/* Modal สำหรับ Login (เรียกใช้ AnimatedModal เหมือนระบบบัญชี) */}
         <AnimatedModal isOpen={showAdminLogin} onClose={() => { setShowAdminLogin(false); setPinInput(''); setPinError(''); }} originClass="origin-top-right" maxWidth="max-w-sm">
             <div className="flex flex-col items-center justify-center mb-6 pt-2">
               <div className="w-14 h-14 bg-orange-50 text-orange-500 rounded-full flex items-center justify-center mb-4 shadow-sm border border-orange-100">
@@ -618,21 +703,30 @@ export default function App() {
           <div className="space-y-4 animate-in fade-in duration-300">
             <div className="grid grid-cols-2 gap-3">
               <div className="bg-white p-4 rounded-2xl shadow-sm border-l-4 border-orange-500 flex flex-col justify-between h-28 hover:-translate-y-0.5 transition-transform">
-                <div className="text-xs text-gray-500 font-bold">รอรับของ</div>
+                <div className="text-xs text-gray-500 font-bold">รอรับของ (ออเดอร์)</div>
                 <div className="text-3xl font-bold text-orange-600">{upcomingOrders.length}</div>
               </div>
               <div className="bg-white p-4 rounded-2xl shadow-sm border-l-4 border-gray-800 flex flex-col justify-between h-28 hover:-translate-y-0.5 transition-transform">
                 <div className="text-xs text-gray-500 font-bold">ออเดอร์ทั้งหมด</div>
                 <div className="text-3xl font-bold text-gray-900">{orders.filter(o => o.status !== 'cancel').length}</div>
               </div>
-              <div className="bg-white p-4 rounded-2xl shadow-sm border-l-4 border-green-500 flex flex-col justify-between h-28 col-span-2 hover:-translate-y-0.5 transition-transform">
+              <div className="bg-white p-4 rounded-2xl shadow-sm border-l-4 border-blue-500 flex flex-col justify-between h-28 hover:-translate-y-0.5 transition-transform">
+                <div className="text-xs text-gray-500 font-bold">ไก่ที่ต้องเตรียม (ชิ้น)</div>
+                <div className="text-3xl font-bold text-blue-600">{totalChickenPieces}</div>
+              </div>
+              <div className="bg-white p-4 rounded-2xl shadow-sm border-l-4 border-green-500 flex flex-col justify-between h-28 hover:-translate-y-0.5 transition-transform">
                 <div className="text-xs text-gray-500 font-bold flex justify-between">
-                  <span>ยอดมัดจำที่ยืนยันแล้ว (บาท)</span>
-                  {unpaidOrders.length > 0 && <span className="text-red-500 bg-red-50 px-2 py-0.5 rounded-md border border-red-100">รอโอน {unpaidOrders.length} บิล</span>}
+                  <span>ยอดมัดจำรวม (฿)</span>
                 </div>
-                <div className="text-3xl font-bold text-green-600">฿{totalDeposit.toLocaleString()}</div>
+                <div className="text-3xl font-bold text-green-600">{totalDeposit.toLocaleString()}</div>
               </div>
             </div>
+            
+            {unpaidOrders.length > 0 && (
+               <div className="bg-red-50 text-red-600 p-3 rounded-xl border border-red-100 text-sm font-bold text-center">
+                 มีออเดอร์ที่ยังไม่โอนเงิน / รอแนบสลิป {unpaidOrders.length} บิล
+               </div>
+            )}
             
             <button onClick={handleSyncToSheets} disabled={syncing} className={`w-full py-4 rounded-2xl font-bold flex items-center justify-center gap-2 shadow-sm text-sm transition-all active:scale-[0.98] border ${syncing ? 'bg-green-50 text-green-700 border-green-200' : 'bg-gray-900 text-white border-gray-800 hover:bg-black'}`}>
               <RefreshCw size={16} className={syncing ? 'animate-spin' : ''} />
@@ -666,12 +760,37 @@ export default function App() {
             <div className="bg-white p-5 rounded-2xl shadow-sm border border-gray-200">
               <h3 className="text-sm font-bold text-gray-800 flex items-center gap-1.5 mb-2"><Receipt size={16} className="text-orange-500"/> บัญชีรับเงิน (PromptPay)</h3>
               <p className="text-[11px] text-gray-500 mb-3">ระบุเบอร์โทรหรือบัตรประชาชน เพื่อสร้าง QR Code ให้ลูกค้าแสกนจ่ายอัตโนมัติ</p>
-              <input type="text" className="w-full h-[52px] border border-gray-300 rounded-xl px-4 text-sm outline-none focus:ring-2 focus:ring-orange-500 bg-gray-50 focus:bg-white transition-all" value={settings?.promptpayId || ''} onChange={e => handleUpdateSettings({...settings, promptpayId: e.target.value})} placeholder="08XXXXXXXX หรือ 1XXXXXXXXXXXX" />
+              <input type="text" className="w-full h-[52px] border border-gray-300 rounded-xl px-4 text-sm outline-none focus:ring-2 focus:ring-orange-500 bg-gray-50 focus:bg-white transition-all text-gray-900" value={settings?.promptpayId || ''} onChange={e => handleUpdateSettings({...settings, promptpayId: e.target.value})} placeholder="08XXXXXXXX หรือ 1XXXXXXXXXXXX" />
             </div>
 
             <div className="bg-white p-5 rounded-2xl shadow-sm border border-gray-200">
               <h3 className="text-sm font-bold text-gray-800 mb-3">ประกาศหน้าร้าน</h3>
-              <input type="text" className="w-full h-[52px] border border-gray-300 rounded-xl px-4 text-sm outline-none focus:ring-2 focus:ring-orange-500 bg-gray-50 focus:bg-white transition-all" value={settings?.announcement || ''} onChange={e => handleUpdateSettings({...settings, announcement: e.target.value})} placeholder="เช่น เปิดรับออเดอร์ถึง 18.00 น." />
+              <input type="text" className="w-full h-[52px] border border-gray-300 rounded-xl px-4 text-sm outline-none focus:ring-2 focus:ring-orange-500 bg-gray-50 focus:bg-white transition-all text-gray-900" value={settings?.announcement || ''} onChange={e => handleUpdateSettings({...settings, announcement: e.target.value})} placeholder="เช่น เปิดรับออเดอร์ถึง 18.00 น." />
+            </div>
+
+            <div className="bg-white p-5 rounded-2xl shadow-sm border border-gray-200">
+              <div className="flex justify-between items-center mb-4">
+                <h3 className="text-sm font-bold text-gray-800 flex items-center gap-1.5"><Truck size={16}/> การจัดส่ง</h3>
+                <button onClick={() => {
+                  const newOpts = [...(settings?.deliveryOptions || []), { id: Date.now().toString(), name: 'ตัวเลือกใหม่', price: 0 }];
+                  handleUpdateSettings({...settings, deliveryOptions: newOpts});
+                }} className="text-[11px] font-bold text-orange-600 bg-orange-50 px-3 py-1.5 rounded-lg border border-orange-100 hover:bg-orange-100 active:scale-95 transition-all">+ เพิ่มค่าส่ง</button>
+              </div>
+              <div className="space-y-2">
+                {settings?.deliveryOptions?.map((opt, index) => (
+                  <div key={opt.id} className="flex gap-2 items-center bg-gray-50 p-2 rounded-xl border border-gray-100">
+                    <input type="text" className="h-[46px] flex-1 border border-gray-300 rounded-lg px-3 text-sm outline-none focus:ring-2 focus:ring-orange-500 bg-white transition-all text-gray-900" value={opt.name} placeholder="ชื่อการจัดส่ง" onChange={e => {
+                      const newOpts = [...settings.deliveryOptions]; newOpts[index].name = e.target.value; handleUpdateSettings({...settings, deliveryOptions: newOpts});
+                    }} />
+                    <input type="number" className="h-[46px] w-20 border border-gray-300 rounded-lg px-2 text-center text-sm outline-none focus:ring-2 focus:ring-orange-500 bg-white font-bold transition-all text-gray-900" value={opt.price} placeholder="ราคา" onChange={e => {
+                      const newOpts = [...settings.deliveryOptions]; newOpts[index].price = e.target.value; handleUpdateSettings({...settings, deliveryOptions: newOpts});
+                    }} />
+                    <button onClick={() => {
+                      if(confirm('ลบตัวเลือกนี้?')) handleUpdateSettings({...settings, deliveryOptions: settings.deliveryOptions.filter(x => x.id !== opt.id)});
+                    }} className="h-[46px] w-[46px] flex items-center justify-center text-gray-400 hover:text-red-500 bg-white border border-gray-200 rounded-lg active:scale-90 transition-all"><Trash2 size={16}/></button>
+                  </div>
+                ))}
+              </div>
             </div>
 
             <div className="bg-white p-5 rounded-2xl shadow-sm border border-gray-200">
@@ -688,13 +807,13 @@ export default function App() {
                     <div className="flex gap-2">
                       <div className="relative flex-1">
                         <span className="absolute -top-2 left-2 bg-gray-50 px-1 text-[9px] font-semibold text-gray-500 z-10">วันที่</span>
-                        <input type="date" className="w-full h-[46px] border border-gray-300 rounded-lg px-3 text-xs outline-none focus:ring-2 focus:ring-orange-500 bg-white" value={d.date} onChange={e => {
+                        <input type="date" className="w-full h-[46px] border border-gray-300 rounded-lg px-3 text-xs outline-none focus:ring-2 focus:ring-orange-500 bg-white text-gray-900" value={d.date} onChange={e => {
                           const newDates = [...settings.pickupDates]; newDates[index].date = e.target.value; handleUpdateSettings({...settings, pickupDates: newDates});
                         }} />
                       </div>
                       <div className="relative flex-1">
                          <span className="absolute -top-2 left-2 bg-gray-50 px-1 text-[9px] font-semibold text-gray-500 z-10">ชื่อรอบ</span>
-                         <input type="text" className="w-full h-[46px] border border-gray-300 rounded-lg px-3 text-xs outline-none focus:ring-2 focus:ring-orange-500 bg-white" value={d.label} placeholder="ชื่อรอบ" onChange={e => {
+                         <input type="text" className="w-full h-[46px] border border-gray-300 rounded-lg px-3 text-xs outline-none focus:ring-2 focus:ring-orange-500 bg-white text-gray-900" value={d.label} placeholder="ชื่อรอบ" onChange={e => {
                            const newDates = [...settings.pickupDates]; newDates[index].label = e.target.value; handleUpdateSettings({...settings, pickupDates: newDates});
                          }} />
                       </div>
@@ -726,10 +845,10 @@ export default function App() {
               <div className="space-y-2">
                 {settings?.menus?.map((m, index) => (
                   <div key={m.id} className="flex gap-2 items-center">
-                    <input type="text" className="h-[46px] flex-1 border border-gray-300 rounded-xl px-3 text-sm outline-none focus:ring-2 focus:ring-orange-500 bg-gray-50 focus:bg-white transition-all" value={m.name} placeholder="ชื่อเมนู" onChange={e => {
+                    <input type="text" className="h-[46px] flex-1 border border-gray-300 rounded-xl px-3 text-sm outline-none focus:ring-2 focus:ring-orange-500 bg-gray-50 focus:bg-white transition-all text-gray-900" value={m.name} placeholder="ชื่อเมนู" onChange={e => {
                       const newMenus = [...settings.menus]; newMenus[index].name = e.target.value; handleUpdateSettings({...settings, menus: newMenus});
                     }} />
-                    <input type="number" className="h-[46px] w-20 border border-gray-300 rounded-xl px-2 text-center text-sm outline-none focus:ring-2 focus:ring-orange-500 bg-gray-50 focus:bg-white font-bold transition-all" value={m.price} placeholder="ราคา" onChange={e => {
+                    <input type="number" className="h-[46px] w-20 border border-gray-300 rounded-xl px-2 text-center text-sm outline-none focus:ring-2 focus:ring-orange-500 bg-gray-50 focus:bg-white font-bold transition-all text-gray-900" value={m.price} placeholder="ราคา" onChange={e => {
                       const newMenus = [...settings.menus]; newMenus[index].price = e.target.value; handleUpdateSettings({...settings, menus: newMenus});
                     }} />
                     <button onClick={() => {
@@ -749,7 +868,7 @@ export default function App() {
         </button>
       )}
 
-      {/* ADMIN EDIT MODAL (ใช้ AnimatedModal แบบเดียวกับระบบบัญชี) */}
+      {/* ADMIN EDIT MODAL */}
       <AnimatedModal isOpen={isModalOpen} onClose={() => setIsModalOpen(false)} maxWidth="max-w-md" pClass="p-0" originClass="origin-bottom">
          <div className="p-4 border-b border-gray-200 flex justify-between items-center bg-white rounded-t-3xl shrink-0 sticky top-0 z-10">
            <h2 className="text-lg font-bold text-gray-900 flex items-center gap-2">
@@ -772,12 +891,12 @@ export default function App() {
            <div className="bg-white p-4 rounded-2xl border border-gray-200 shadow-sm space-y-4">
              <div className="relative">
                 <span className="absolute -top-2.5 left-3 bg-white px-1 text-[10px] font-semibold text-gray-500 z-10">ชื่อลูกค้า *</span>
-                <input type="text" className="w-full h-[52px] border border-gray-300 rounded-xl px-4 text-sm outline-none focus:ring-2 focus:ring-orange-500 bg-white" placeholder="ชื่อ" value={formData.name} onChange={e => setFormData({...formData, name: e.target.value})} />
+                <input type="text" className="w-full h-[52px] border border-gray-300 rounded-xl px-4 text-sm outline-none focus:ring-2 focus:ring-orange-500 bg-white text-gray-900" placeholder="ชื่อ" value={formData.name} onChange={e => setFormData({...formData, name: e.target.value})} />
              </div>
              <div className="grid grid-cols-2 gap-3">
                 <div className="relative">
                    <span className="absolute -top-2.5 left-3 bg-white px-1 text-[10px] font-semibold text-gray-500 z-10">เบอร์โทร</span>
-                   <input type="tel" className="w-full h-[52px] border border-gray-300 rounded-xl px-4 text-sm outline-none focus:ring-2 focus:ring-orange-500 bg-white" placeholder="08XXXXXXXX" value={formData.phone} onChange={e => setFormData({...formData, phone: e.target.value})} />
+                   <input type="tel" className="w-full h-[52px] border border-gray-300 rounded-xl px-4 text-sm outline-none focus:ring-2 focus:ring-orange-500 bg-white text-gray-900" placeholder="08XXXXXXXX" value={formData.phone} onChange={e => setFormData({...formData, phone: e.target.value})} />
                 </div>
                 <div className="relative">
                    <span className="absolute -top-2.5 left-3 bg-white px-1 text-[10px] font-semibold text-gray-500 z-10">วันที่รับของ</span>
@@ -788,7 +907,7 @@ export default function App() {
            
            <div className="bg-white p-4 rounded-2xl border border-gray-200 shadow-sm space-y-3">
              <div className="flex justify-between items-center ml-1">
-               <label className="block text-xs font-bold text-gray-800">รายการเมนู</label>
+               <label className="block text-xs font-bold text-gray-800">รายการเมนู และ ค่าส่ง</label>
                <div className="flex gap-1.5">
                   {formData.items.length > 0 && formData.items[0].menu !== '' && (
                      <button onClick={() => setFormData({ ...formData, items: [{ menu: '', qty: '' }] })} className="text-[10px] text-red-500 font-bold bg-red-50 px-2 py-1 rounded-md border border-red-100 flex items-center gap-1 active:scale-90">
@@ -803,7 +922,7 @@ export default function App() {
              {formData.items.map((item, i) => (
                <div key={i} className="flex gap-2">
                  <div className="relative flex-1">
-                    <select className="w-full h-[46px] border border-gray-300 rounded-xl px-3 text-sm outline-none appearance-none focus:ring-2 focus:ring-orange-500 bg-white font-medium" value={item.menu} onChange={e => {
+                    <select className="w-full h-[46px] border border-gray-300 rounded-xl px-3 text-sm outline-none appearance-none focus:ring-2 focus:ring-orange-500 bg-white font-medium text-gray-900" value={item.menu} onChange={e => {
                       const newItems = [...formData.items]; newItems[i].menu = e.target.value; setFormData({ ...formData, items: newItems });
                     }}>
                       <option value="">เลือกเมนู...</option>
@@ -811,23 +930,44 @@ export default function App() {
                     </select>
                     <div className="absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none text-gray-400 text-xs">▼</div>
                  </div>
-                 <input type="number" min="1" className="w-16 h-[46px] border border-gray-300 rounded-xl px-2 text-center text-sm outline-none focus:ring-2 focus:ring-orange-500 bg-white font-bold" placeholder="จำนวน" value={item.qty} onChange={e => {
+                 <input type="number" min="1" className="w-16 h-[46px] border border-gray-300 rounded-xl px-2 text-center text-sm outline-none focus:ring-2 focus:ring-orange-500 bg-white font-bold text-gray-900" placeholder="จำนวน" value={item.qty} onChange={e => {
                    const newItems = [...formData.items]; newItems[i].qty = e.target.value; setFormData({ ...formData, items: newItems });
                  }} />
                  <button onClick={() => setFormData({...formData, items: formData.items.filter((_, idx) => idx !== i)})} className="w-[46px] h-[46px] flex items-center justify-center text-gray-400 hover:text-red-500 bg-gray-50 border border-gray-200 rounded-xl active:scale-90 transition-all"><Trash2 size={16}/></button>
                </div>
              ))}
+
+             <div className="relative mt-2 pt-2 border-t border-gray-100">
+                <span className="absolute top-0 left-2 bg-white px-1 text-[9px] font-semibold text-orange-600 z-10">การจัดส่ง (แอดมินแก้ได้)</span>
+                <select className="w-full h-[46px] border border-orange-200 rounded-xl px-3 text-sm outline-none appearance-none focus:ring-2 focus:ring-orange-500 bg-orange-50/30 font-medium text-gray-900 mt-2" 
+                  value={formData.delivery?.name || ''} 
+                  onChange={e => {
+                    const selectedOption = settings?.deliveryOptions?.find(opt => opt.name === e.target.value);
+                    setFormData({ ...formData, delivery: { name: selectedOption?.name || '', price: Number(selectedOption?.price || 0) } });
+                  }}>
+                  <option value="">ไม่มี / ไม่คิดค่าส่ง</option>
+                  {settings?.deliveryOptions?.map(opt => <option key={opt.id} value={opt.name}>{opt.name} (+฿{opt.price})</option>)}
+                </select>
+                <div className="absolute right-3 top-[60%] -translate-y-1/2 pointer-events-none text-orange-400 text-xs">▼</div>
+             </div>
+             
+             {calculatedTotal > 0 && (
+                <div className="flex justify-between items-center text-sm pt-2 mt-2 border-t border-dashed border-gray-200">
+                  <span className="text-gray-500 font-bold">ยอดรวมที่คำนวณได้:</span>
+                  <span className="font-bold text-orange-600">฿{calculatedTotal.toLocaleString()}</span>
+                </div>
+              )}
            </div>
 
            <div className="bg-white p-4 rounded-2xl border border-gray-200 shadow-sm space-y-4">
               <div className="grid grid-cols-2 gap-3">
                 <div className="relative">
-                   <span className="absolute -top-2.5 left-3 bg-white px-1 text-[10px] font-semibold text-gray-500 z-10">ยอดมัดจำ (฿)</span>
+                   <span className="absolute -top-2.5 left-3 bg-white px-1 text-[10px] font-semibold text-gray-500 z-10">ยอดโอนจริง/มัดจำ (฿)</span>
                    <input type="number" className="w-full h-[52px] border border-gray-300 rounded-xl px-4 text-sm outline-none focus:ring-2 focus:ring-orange-500 bg-white font-bold text-green-600" value={formData.deposit} onChange={e => setFormData({...formData, deposit: e.target.value})} placeholder="0.00" />
                 </div>
                 <div className="relative">
                    <span className="absolute -top-2.5 left-3 bg-white px-1 text-[10px] font-semibold text-gray-500 z-10">สถานะออเดอร์</span>
-                   <select className="w-full h-[52px] border border-gray-300 rounded-xl px-3 text-sm outline-none focus:ring-2 focus:ring-orange-500 bg-white font-bold appearance-none" value={formData.status} onChange={e => setFormData({...formData, status: e.target.value})}>
+                   <select className="w-full h-[52px] border border-gray-300 rounded-xl px-3 text-sm outline-none focus:ring-2 focus:ring-orange-500 bg-white font-bold appearance-none text-gray-900" value={formData.status} onChange={e => setFormData({...formData, status: e.target.value})}>
                      <option value="pending">⏳ รอรับของ</option>
                      <option value="done">✅ รับแล้ว</option>
                      <option value="cancel">❌ ยกเลิก</option>
@@ -836,7 +976,7 @@ export default function App() {
               </div>
               <div className="relative">
                   <span className="absolute -top-2.5 left-3 bg-white px-1 text-[10px] font-semibold text-gray-500 z-10">หมายเหตุ</span>
-                  <textarea className="w-full p-3 border border-gray-300 rounded-xl outline-none focus:ring-2 focus:ring-orange-500 bg-white text-sm min-h-[60px] resize-none" value={formData.note} onChange={e => setFormData({...formData, note: e.target.value})} placeholder="ระบุเพิ่มเติม..." />
+                  <textarea className="w-full p-3 border border-gray-300 rounded-xl outline-none focus:ring-2 focus:ring-orange-500 bg-white text-sm min-h-[60px] resize-none text-gray-900" value={formData.note} onChange={e => setFormData({...formData, note: e.target.value})} placeholder="ระบุเพิ่มเติม..." />
               </div>
            </div>
          </div>
@@ -890,6 +1030,12 @@ function OrderCard({ order, onEdit }) {
             <span className="font-bold text-gray-900">x{i.qty}</span>
           </div>
         ))}
+        {order.delivery?.name && (
+          <div className="flex justify-between items-center text-xs text-gray-500 pt-1 mt-1 border-t border-gray-200">
+             <span>ค่าส่ง ({order.delivery.name})</span>
+             <span className="font-medium">฿{order.delivery.price}</span>
+          </div>
+        )}
         {order.totalPrice > 0 && (
           <div className="flex justify-between items-center text-sm pt-2 mt-1.5 border-t border-dashed border-gray-200">
             <span className="text-xs font-bold text-gray-500">ยอดรวม:</span>
