@@ -2,7 +2,7 @@ import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { initializeApp } from 'firebase/app';
 import { getAuth, signInAnonymously, onAuthStateChanged } from 'firebase/auth';
 import { getFirestore, collection, addDoc, updateDoc, deleteDoc, doc, onSnapshot, setDoc } from 'firebase/firestore';
-import { getStorage, ref, uploadBytes, getDownloadURL } from 'firebase/storage';
+// ลบ firebase/storage ออกไปเลย ไม่ต้องง้อแล้ว!
 import { Home, ListOrdered, Plus, X, ChevronLeft, CheckCircle2, RefreshCw, Trash2, Edit3, Settings, Lock, Store, UploadCloud, Receipt, Image as ImageIcon, Eraser, LogOut, Truck } from 'lucide-react';
 
 // --- 1. FIREBASE INITIALIZATION ---
@@ -18,7 +18,6 @@ const firebaseConfig = {
 const app = initializeApp(firebaseConfig);
 const auth = getAuth(app);
 const db = getFirestore(app);
-const storage = getStorage(app);
 
 // --- CONFIG & CONSTANTS ---
 const ADMIN_PIN = '842019';
@@ -104,10 +103,9 @@ export default function App() {
 
   // File Upload State
   const fileInputRef = useRef(null);
-  const [slipFile, setSlipFile] = useState(null);
-  const [slipPreview, setSlipPreview] = useState('');
+  const [slipPreview, setSlipPreview] = useState(''); // เก็บภาพแบบ Base64
 
-  // Form State (Added delivery)
+  // Form State
   const initialForm = { 
     name: '', phone: '', pickupDate: '', 
     items: [{ menu: '', qty: '' }], 
@@ -137,7 +135,6 @@ export default function App() {
     const unsubSettings = onSnapshot(settingsRef, (snapshot) => {
       if (snapshot.exists()) {
         const data = snapshot.data();
-        // Merge missing default keys just in case
         setSettings({ ...DEFAULT_SETTINGS, ...data });
       } else {
         setDoc(settingsRef, DEFAULT_SETTINGS);
@@ -182,14 +179,12 @@ export default function App() {
     return orders.filter(o => o.status !== 'cancel').reduce((sum, o) => sum + parseFloat(o.deposit || 0), 0);
   }, [orders]);
 
-  // คำนวณจำนวนชิ้นไก่รวมทั้งหมด (เฉพาะออเดอร์ที่ไม่ได้ยกเลิก)
   const totalChickenPieces = useMemo(() => {
     return orders.filter(o => o.status !== 'cancel').reduce((sum, o) => {
       return sum + (o.items || []).reduce((itemSum, item) => itemSum + (parseInt(item.qty) || 0), 0);
     }, 0);
   }, [orders]);
 
-  // Calculate Total Price dynamically (Menu + Delivery)
   const calculatedTotal = useMemo(() => {
     if (!settings?.menus) return 0;
     const menuTotal = formData.items.reduce((sum, item) => {
@@ -200,14 +195,13 @@ export default function App() {
     }, 0);
     
     const deliveryFee = Number(formData.delivery?.price) || 0;
-    
     return menuTotal + deliveryFee;
   }, [formData.items, formData.delivery, settings?.menus]);
 
   // Check if slip is mandatory
   const isSlipRequired = useMemo(() => {
-    return calculatedTotal > 0 && settings?.promptpayId && !slipFile && role === 'guest';
-  }, [calculatedTotal, settings?.promptpayId, slipFile, role]);
+    return calculatedTotal > 0 && settings?.promptpayId && !slipPreview && role === 'guest';
+  }, [calculatedTotal, settings?.promptpayId, slipPreview, role]);
 
   // --- ACTIONS ---
   const handlePinInput = (val) => {
@@ -229,19 +223,45 @@ export default function App() {
     }
   };
 
+  // ----------------------------------------------------
+  // ฟังก์ชันบีบอัดรูปภาพเป็น Base64 (ไม่ต้องพึ่ง Storage)
+  // ----------------------------------------------------
   const handleFileChange = (e) => {
     const file = e.target.files[0];
     if (!file) return;
     
-    if (file.size > 5 * 1024 * 1024) { 
-      alert('ขนาดไฟล์ใหญ่เกินไป (สูงสุด 5MB)');
-      return;
-    }
-
-    setSlipFile(file);
     const reader = new FileReader();
-    reader.onloadend = () => {
-      setSlipPreview(reader.result);
+    reader.onload = (event) => {
+      const img = new Image();
+      img.onload = () => {
+        // ย่อขนาดภาพให้ไม่เกิน 800x1000 พิกเซล
+        const canvas = document.createElement('canvas');
+        const MAX_WIDTH = 800;
+        const MAX_HEIGHT = 1000;
+        let width = img.width;
+        let height = img.height;
+
+        if (width > height) {
+          if (width > MAX_WIDTH) {
+            height *= MAX_WIDTH / width;
+            width = MAX_WIDTH;
+          }
+        } else {
+          if (height > MAX_HEIGHT) {
+            width *= MAX_HEIGHT / height;
+            height = MAX_HEIGHT;
+          }
+        }
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext('2d');
+        ctx.drawImage(img, 0, 0, width, height);
+
+        // แปลงภาพที่ย่อแล้วเป็น Base64 (คุณภาพ 70%) ลดจาก 5MB เหลือ ~50KB
+        const compressedBase64 = canvas.toDataURL('image/jpeg', 0.7);
+        setSlipPreview(compressedBase64); // เก็บโค้ดรูปลง State เพื่อเตรียมส่งเข้า Database
+      };
+      img.src = event.target.result;
     };
     reader.readAsDataURL(file);
   };
@@ -257,33 +277,20 @@ export default function App() {
       if (activeDates.length > 0) finalPickupDate = activeDates[0].date;
     }
 
-    // ตรวจสอบว่ากรอกเมนูและจำนวนครบทุกบรรทัดหรือไม่
     const hasInvalidItems = formData.items.some(i => !i.menu || !i.qty || Number(i.qty) <= 0);
     if (hasInvalidItems || formData.items.length === 0) return alert('กรุณาเลือกเมนูและระบุจำนวนให้ครบถ้วนทุกรายการ');
 
-    // ตรวจสอบว่าเลือกการจัดส่งหรือยัง (สำหรับลูกค้า)
     if (role === 'guest' && !formData.delivery?.name) return alert('กรุณาเลือกวิธีการจัดส่ง / รับของ');
-
     if (isSlipRequired) return alert('กรุณาแนบสลิปการโอนเงินก่อนยืนยันออเดอร์');
 
     const validItems = formData.items.filter(i => i.menu && i.qty);
-
     setIsSubmitting(true);
-    let finalSlipUrl = formData.slipUrl;
 
     try {
-      if (slipFile) {
-        const fileExt = slipFile.name.split('.').pop();
-        const fileName = `receipts/slip_${Date.now()}.${fileExt}`;
-        const storageRef = ref(storage, fileName);
-        await uploadBytes(storageRef, slipFile);
-        finalSlipUrl = await getDownloadURL(storageRef);
-      }
-
       const ordersRef = collection(db, 'preorder_list');
       
       let finalDeposit = formData.deposit;
-      if (role === 'guest' && slipFile && calculatedTotal > 0) {
+      if (role === 'guest' && slipPreview && calculatedTotal > 0) {
         finalDeposit = calculatedTotal; 
       }
 
@@ -293,7 +300,7 @@ export default function App() {
         items: validItems,
         totalPrice: calculatedTotal,
         deposit: finalDeposit,
-        slipUrl: finalSlipUrl,
+        slipUrl: slipPreview, // บันทึกรูป (Base64) ลงฐานข้อมูลโดยตรงเลย
         updatedAt: new Date().toISOString()
       };
 
@@ -310,12 +317,11 @@ export default function App() {
       }
       
       setFormData(initialForm);
-      setSlipFile(null);
       setSlipPreview('');
       setEditId(null);
     } catch (err) {
       console.error("Save Error:", err);
-      alert('เกิดข้อผิดพลาดในการบันทึกข้อมูล');
+      alert('เกิดข้อผิดพลาดในการบันทึกข้อมูล: ' + err.message);
     } finally {
       setIsSubmitting(false);
     }
@@ -344,7 +350,6 @@ export default function App() {
   const handleSyncToSheets = async () => {
     setSyncing(true);
     try {
-      // จัดรูปแบบข้อมูลใหม่ทั้งหมด เพื่อส่งไปเขียนลง Google Sheets ครบทุกคอลัมน์
       const formattedOrders = orders.map(o => ({
         id: o.id,
         timestamp: new Date(o.createdAt).toLocaleString('th-TH'),
@@ -391,7 +396,6 @@ export default function App() {
       setFormData(initialForm);
       setSlipPreview('');
     }
-    setSlipFile(null);
     setIsModalOpen(true);
   };
 
@@ -411,7 +415,7 @@ export default function App() {
           </div>
           <h2 className="text-2xl font-bold text-gray-900 mb-2">ได้รับออเดอร์แล้ว</h2>
           <p className="text-gray-500 mb-10 max-w-xs leading-relaxed">ทางร้านจะติดต่อกลับเพื่อคอนเฟิร์มการจัดส่งนะครับ ขอบคุณที่อุดหนุน!</p>
-          <button onClick={() => { setGuestSuccess(false); setFormData(initialForm); setSlipPreview(''); setSlipFile(null); }} className="bg-orange-500 text-white px-8 py-3.5 rounded-2xl font-bold active:scale-[0.98] transition-all shadow-md">
+          <button onClick={() => { setGuestSuccess(false); setFormData(initialForm); setSlipPreview(''); }} className="bg-orange-500 text-white px-8 py-3.5 rounded-2xl font-bold active:scale-[0.98] transition-all shadow-md">
             สั่งเพิ่มอีกออเดอร์
           </button>
         </div>
@@ -488,6 +492,7 @@ export default function App() {
                  <span className="w-1.5 h-4 bg-orange-500 rounded-full"></span> รายการอาหาร
               </h3>
               <div className="flex gap-2">
+                 {/* ปุ่มล้างข้อมูล */}
                  {formData.items.length > 0 && formData.items[0].menu !== '' && (
                     <button onClick={() => setFormData({ ...formData, items: [{ menu: '', qty: '' }] })} className="text-[11px] font-bold text-red-500 bg-red-50 hover:bg-red-100 px-2.5 py-1.5 rounded-lg transition-colors flex items-center gap-1 active:scale-95">
                       <Eraser size={12}/> ล้าง
@@ -590,7 +595,7 @@ export default function App() {
                   ) : (
                     <div className="relative inline-block w-full">
                       <img src={slipPreview} alt="Slip Preview" className="w-full h-40 object-cover rounded-xl border border-gray-200 shadow-sm" />
-                      <button onClick={() => { setSlipPreview(''); setSlipFile(null); }} className="absolute -top-2 -right-2 p-1.5 bg-red-500 text-white rounded-full shadow-sm hover:bg-red-600 active:scale-90 transition-transform">
+                      <button onClick={() => { setSlipPreview(''); }} className="absolute -top-2 -right-2 p-1.5 bg-red-500 text-white rounded-full shadow-sm hover:bg-red-600 active:scale-90 transition-transform">
                         <X size={14} />
                       </button>
                       <div className="mt-3 text-xs text-green-600 font-bold flex justify-center items-center gap-1.5 bg-green-50 py-2 rounded-lg border border-green-100">
